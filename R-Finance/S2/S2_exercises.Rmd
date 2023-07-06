@@ -1,0 +1,102 @@
+---
+title: "Tidyverse exercises"
+output: html_notebook
+---
+
+# Songs dataset: exercises
+
+```{r}
+library(tidyverse) # Just to be sure it's the first thing that is done...
+library(magrittr)
+```
+
+
+From the **songs** dataset:
+
+0. **load** the data.
+```{r}
+load("songs.RData")
+```
+
+
+1. **find** the songs with popularity (strictly) above 95. 
+```{r}
+songs %>% filter(popularity > 95)
+```
+
+2. **find** the songs from Kanye West.    
+```{r}
+songs %>% 
+  filter(artist == "Kanye West")
+```
+
+3. **create** a **pivot table** over **artists** that **counts** how many **songs** they have in the dataset and then sort the result in descending order (the first line corresponds to the artist with the most songs).  
+
+```{r}
+songs %>% 
+  group_by(artist) %>% 
+  summarize(num_songs = n())%>% 
+  arrange(desc(num_songs))
+```
+
+
+4. **create** a **pivot table** over artists that averages the popularity of their songs and sort the results in descending order (the first line corresponds to the artist that has the most popular songs on average).  
+
+```{r}
+songs %>% 
+  group_by(artist) %>% 
+  summarize(avg_popularity = mean(popularity))%>% 
+  arrange(desc(avg_popularity))
+```
+
+5. in the above pivot table, the best artists are those with only one (good) song. That's not fair! In order to take this into account, **create** a **pivot table** with the two indicators (number of songs and average popularity), filter the artists with at least 10 songs and then rank them in descending average popularity.
+```{r}
+songs %>% 
+  group_by(artist) %>% 
+  summarize(num_songs = n(), 
+            avg_popularity = mean(popularity)) %>% 
+  filter(num_songs >= 10) %>% 
+  arrange(desc(avg_popularity))
+```
+
+
+# Movies dataset: exercises
+
+From the **movies** dataset:
+
+0. **load** the data.
+
+1. **find** the **movies** with **imdb score** strictly above 8.8 (those are the great movies).   
+```{r}
+load("movies.RData")
+
+```
+
+2. **find** the movies from **Tim Burton**. 
+```{r}
+movies %>% 
+  filter(director == "Tim Burton")
+```
+
+
+3. **compute** the number of different directors in the dataset.
+```{r}
+num_directors <- length(unique(movies$director))
+num_directors
+
+```
+
+4. **create** a **pivot table** over **directors** that **counts** how many **films** they have in the dataset and sort the result in descending order (the first line corresponds to the director with the most films).  
+```{r}
+movies %>% 
+  group_by(director) %>% 
+  summarize(num_movies = n())%>% 
+  arrange(desc(num_movies))
+```
+
+
+5. **create** a **pivot table** over directors that averages the imdb score of their films and sort the results in descending order (the first line corresponds to the director that has the most popular films on average).  
+
+6. in the above pivot table, the best directors are those with only one (good) film That's not fair! In order to take this into account, **create** a pivot table with the two indicators (number of songs and average popularity), filter the directors with at least 10 films and then rank them in descending average imdb score. 
+
+7. **create** a **new column** that compute the **earnings/budget ratio**. Perform the same analysis as question 6. but on this ratio.

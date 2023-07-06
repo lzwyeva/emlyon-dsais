@@ -1,0 +1,365 @@
+---
+title: "Credit scoring:"
+author: "ZHANG Hanrui" 
+format: 
+  html:
+    toc: true
+    toc-location: left
+    page-layout: full
+    df-print: kable
+    theme: cosmo
+    fontsize: 1.0em    
+    embed-resources: true
+---
+-   For 
+**individuals** (*credit scoring*), this usually encompasses: age, gender, income, wealth, job type, payment history (prior defaults), etc.  
+```{r}
+#install.packages("tidyverse") 
+#install.packages(c("tidymodels", "randomForest", "doParallel", "torch", "caTools", "tabnet", "lime", "luz"))
+#install.packages("caret")
+```
+
+# Data
+
+```{r, message = F, warning = F}
+library(tidyverse)                           # Data wrangling
+library(tidymodels)                          # ML workflow
+library(caret)
+load("bankruptcy.RData")
+dim(bankruptcy) # Load data
+```
+Have a look of our column names:
+Our target variable is the first column ["Bankrupt?"] which is binary (1-Yes,0-No)
+-From this table we can observed that there  are few company in our dataset faced bankrupt. This is an imbalanced data so we need to keep in mind that the result might be biased.
+change the space into '_' which will be helpful to mention the column name in the following commandes.
+```{r}
+names(bankruptcy)[1] <- "Bankrupt"
+names(bankruptcy) <- gsub(" ", "_", names(bankruptcy))
+colnames(bankruptcy)
+```
+have a look at missing data
+```{r}
+sum(is.na(bankruptcy))
+```
+This in no missing value in our bankruptcy dataset.
+Let's check the type of each column:
+```{r}
+str(bankruptcy)
+```
+Our data are in numerical format.
+
+```{r}
+data <- bankruptcy |>                            
+  na.omit() |>                # Remove rows with missing points
+  mutate(Bankrupt = as.factor(Bankrupt),    # Categorize (for classification) 
+         across(where(is.character), as.factor))
+data |> head()
+```
+# Pivot table practice
+```{r}
+data |>
+  group_by(Bankrupt) |>
+  summarise(avg_Operating_Profit_Rate = mean(Operating_Profit_Rate)|> round(4),
+            avg_Gross_Profit_to_Sales = mean(Gross_Profit_to_Sales)|> round(2))
+```
+
+# Check the our sample frequency
+
+```{r}
+library(ggplot2)
+pie(table(data[1]),
+       main="Frequency of Bankrutcy",
+       xlab="Bankruptcy Tag",
+       ylab="Number of Companies",
+       col= c("blue", "green"))
+box()
+```
+Identify columns in the bankruptcy data frame that have no variability:
+-If have one we need to delete it because it's not useful, no information.
+-All the data in this column are same
+```{r}
+which(apply(data, 2, var)==0)
+```
+So we need to remove this column which just contained one value "1".
+```{r}
+data <- subset(data, select = -Net_Income_Flag)
+```
+
+# Baseline learning
+## Preparation
+
+As is usual in machine learning, we will split the data in two part
+- train / test 
+-cross validation with 5 folds : help us to train a more stable model
+```{r}
+data_split <- initial_split(data, prop = 0.75) # 0.5 to save time on training...
+data_train <- training(data_split) |> vfold_cv(v = 5) # Creates the folds
+data_test <- testing(data_split)
+```
+
+## Model Pipeline
+
+```{r}
+library(randomForest)             # Just in case...
+rf_model <-                       # Here we define the model
+  rand_forest(
+    mtry = tune(),            # The hyperparameters will be tuned!
+    trees = tune()
+  ) |>
+  set_engine("randomForest") |> # I use randomForest to train my model
+  set_mode("classification")    # Classification problem (1/0)
+```
+
+## hyperparameters metric
+```{r}
+rf_grid <- grid_regular(mtry(range = c(10, 20)),  # There are dedicated function for parameters!
+                        trees(range = c(5, 20)),  # Small numbers to reduce CPU time
+                        levels = c(2,3))          # 2 & 3 choices for 1st and 2nd parameters
+rf_grid
+```
+## WorkFlow
+
+```{r}
+set.seed(42)
+rf_wf <- workflow() |>
+  add_model(rf_model) |>
+  add_formula(Bankrupt ~ .)  # This means we predict Bankrupt with all other variables
+```
+Here I do the parallel to reduce the training time :
+
+```{r}
+library(doParallel)
+doParallel::registerDoParallel(6)        # Specifies the number of cores
+rf_res <- rf_wf |>
+  tune_grid(                             # This will train on all params
+    resamples = data_train,
+    grid = rf_grid
+  )
+show_best(rf_res, metric = "accuracy")   # Shows the best params
+```
+The average accuracy rate is high, but as we have an extremely imbalanced dataset, there might be overfitting.
+
+```{r}
+mean(data$Bankrupt |> as.character() |> as.numeric() == 0)
+```
+if we predict 0 each time, we would be correct 96% of the time.So we can't say our model has high accuracy honestily.
+
+# Neuralnetwork with torch
+```{r}
+#install.packages("torch")
+library(torch)
+```
+Here I select the data to train in DL model and put them into a new dataframe called data_nn, scale the data with MinMax Scaler
+```{r}
+data_nn <- data |> select(where(is.numeric))
+
+scale_0_1 <- function(v){(v-min(v))/(max(v)-min(v))}
+data_nn <- data_nn |>
+  mutate(across(everything(), scale_0_1))
+
+data_nn <- bind_cols(Bankrupt = data$Bankrupt, data_nn)
+data_nn$Bankrupt <- data_nn$Bankrupt |> as.character() |> as.numeric()
+```
+## Data preparation
+```{r}
+scoring_dataset <- dataset(
+  name = "scoring_dataset",
+  initialize = function(index) {
+    self$data <- self$prepare_scoring_data(index)
+  },
+  
+  .getitem = function(index) {
+    x <- self$data[index, 2:-1]               # Predictors
+    y <- self$data[index, 1]$to(torch_long()) # Target-Bankrupt
+    list(x, y)
+  },
+  
+  .length = function() {
+    self$data$size()[[1]]
+  },
+  
+  prepare_scoring_data = function(index) {
+    input <- na.omit(data_nn |> select(where(is.numeric))) 
+    input <- input[index, ]             # Here we slice the data (too long)
+    input <- data.matrix(input)
+    torch_tensor(input)
+  }
+)
+```
+```{r}
+score_data <- scoring_dataset(1:5000)
+score_data$.length()
+```
+```{r}
+score_data$.getitem(1)
+```
+
+```{r}
+dl <- score_data |> dataloader(batch_size = 32)
+```
+
+## Model architecture
+```{r}
+net <- nn_module(
+  "ScoringNet",
+  initialize = function() {
+    self$fc1 <- nn_linear(94, 64) # There are  94predictors in the data (1st number)
+    self$fc2 <- nn_linear(64, 8)
+    self$fc3 <- nn_linear(8,1)
+  },
+  # Below, we code the feed-forward structure
+  forward = function(x) {
+    x |> 
+      self$fc1() |> 
+      nnf_relu() |>
+      self$fc2() |> 
+      nnf_relu() |>
+      self$fc3() |>
+      nnf_sigmoid() 
+  }
+)
+model <- net()
+```
+Next, the optimizer (gradient descent)… with the learning rate.
+```{r}
+optimizer <- optim_sgd(model$parameters, lr = 0.01)
+```
+## Training
+```{r}
+for(epoch in 1:10) {                        # Loop on epochs
+  l <- c()
+  coro::loop(for (b in dl) {                  # Loop on batchs
+    optimizer$zero_grad()                     # Initialize gradients to zero
+    output <- model(b[[1]])$to(torch_float()) # Forward pass
+    loss <- nnf_binary_cross_entropy(output, 
+                                     b[[2]]$to(torch_float()))    # Computes loss
+    loss$backward()                           # Computes dloss/dx for every parameter x
+    optimizer$step()                          # Parameter update
+    l <- c(l, loss$item())                    # Stores loss of batch
+  })
+  cat(sprintf("Loss at epoch %d: %3f\n", epoch, mean(l)))
+}
+```
+```{r}
+score_data <- scoring_dataset(1001:1500)
+dl_test <- score_data %>% dataloader(batch_size = 1)
+
+preds <- c()
+coro::loop(for (b in dl_test) {
+  output <- model(b[[1]])
+  preds <- c(preds, output %>% as.numeric())
+})
+# Accuracy below: we round predictions...
+mean(round(preds) == as_array(score_data$.getitem(1:500)[[2]]) )
+```
+## Evaluation
+Because the problem of imbanlenced is still existing so we need to compute the AUC: area under the ROC curve:
+```{r}
+library(caTools)
+ colAUC(X = preds, 
+       y = as_array(score_data$.getitem(1:500)[[2]]), 
+       plotROC = TRUE) 
+```
+ The ROC curve plots the true positive rate (TPR) against the false positive rate (FPR) for different classification thresholds.
+ In the ROC curve, each point corresponds to a different threshold value, and the curve shows how the TPR and FPR change as the threshold is varied. A perfect classifier would have a TPR of 1 and an FPR of 0, which would correspond to a point in the upper left corner of the ROC curve.
+  the AUC value is 0.7985419, which is less than 1 but greater than 0.5. This suggests that the binary classifier has some predictive power, but it is not perfect.
+# Simpler syntax
+Try to use luz package
+
+```{r}
+library(luz)
+
+dl_train <- score_data |> dataloader(batch_size = 32)
+dl_test <- score_data |> dataloader(batch_size = 32)
+
+fit_luz <- net %>%
+  setup(
+    metrics = list(luz_metric_accuracy()),
+    optimizer = optim_adam,
+    loss = function(input, target) {
+      nnf_binary_cross_entropy(input, target$float()$unsqueeze(-1))
+    }
+  ) %>%
+  fit(dl_train, epochs = 10, valid_data = dl_test)
+```
+
+## Tabnets
+```{r}
+library(tabnet)
+data_split_nn <- initial_split(data_nn |> mutate(Bankrupt = as.factor(Bankrupt)), 
+                               prop = 0.5) # 0.5 to save time on training...
+data_train_nn <- training(data_split_nn) 
+data_test_nn <- testing(data_split_nn)
+```
+```{r}
+tab_mod <- tabnet(epochs = 5, 
+                  batch_size = 512, 
+                  decision_width = 8, 
+                  attention_width = 8,
+                  num_steps = 3, 
+                  penalty = 0.0001, 
+                  virtual_batch_size = 512, 
+                  momentum = 0.2,
+                  feature_reusage = 1.5, 
+                  learn_rate = 0.001) %>%
+  set_engine("torch", verbose = TRUE) %>%
+  set_mode("classification")
+```
+```{r}
+tab_wf <- workflow() |>
+  add_model(tab_mod) |>
+  add_formula(Bankrupt ~ .) 
+```
+```{r}
+fitted_tabnet <- tab_wf %>% fit(data_train_nn)
+```
+Access training data/performance:
+
+```{r}
+fitted_tabnet$fit$fit$fit$fit$metrics
+```
+To predict:
+```{r}
+pred_nn <- predict(fitted_tabnet, data_test_nn)
+mean(pred_nn$.pred_class == data_test_nn$Bankrupt)
+```
+So in this case it's hard to beat 93% threshold
+## Interpretability
+"white-box" the outcome of the predictions.
+- global interpretability: in this case, we seek to understand how the model works on a large set of observations, for instance, on the whole training set.
+- local interpretability: in this case, the focus is set on one (or a few) observations and the aim is to understand how the model behaves for this particular point.
+### One popular approach for the latter is Local Interpretable Model-agnostic Explanation: LIME.
+For this test, we briefly re-train a Random Forest model like the ones used above.
+```{r}
+library(lime) 
+rf_model_2 <- randomForest(      # Training the RF model 
+  x = data |> select(-Bankrupt), 
+  y = data$Bankrupt,
+  mtry = 18,                     # 18 predictors for each tree
+  trees = 15,                    # 15 trees in the forest
+  sampsize = 2500,              # 20k observations used for each tree
+  nodesize = 30,                 # At least 30 obs in each leaf
+  maxnodes = 32,                 # No more than 32 leaves in total for each tree
+)
+```
+Once we have the model, LIME proceed in two steps.
+We seek explanations for the first 2 observations in the sample.
+```{r}
+out_lime <- lime(data |> select(-Bankrupt), 
+                 model = as_classifier(rf_model_2))
+```
+```{r}
+explanation <- explain(x = data |> 
+                         select(-Bankrupt) |>
+                         slice(1:2),            # First two instances in train_sample 
+                       explainer = out_lime,    # Explainer variable created above 
+                       labels = TRUE,
+                       n_permutations = 900,    # Nb samples for loss function
+                       n_features = 7           # Nb of features shown (important ones)
+)
+plot_features(explanation, ncol = 1)            # Visual display
+```
+The blue bars go in the direction of the final predictions, the red ones go against.
+I tried to change the n_permutations from 900 to 90 and even I tried 80 and it seems that the result will change a lot based on that value.
+Even I tried with 900 for again the result is defferent.
+In this situation, we can say the features that influence how this instance tends to Bankrupt is Liability-Assets_Flag, the features that influence how this instance tends not to Bankrupt are Net_Values_growth_Rate, Borrowing_dependency_Net_Income_to_Stockholder's_Equity... which did make sense in reality. 
